@@ -14,13 +14,11 @@ Author: BraveJIG CLI Development Team
 Date: 2025-08-10
 """
 
-from .illuminance_module import IlluminanceModule
 from .illuminance_parameters import IlluminanceParameters
 from .base_illuminance import IlluminanceSensorBase, IlluminanceCommand
 
-# Main exports
+# Main exports (リファクタリング後)
 __all__ = [
-    'IlluminanceModule',
     'IlluminanceParameters', 
     'IlluminanceSensorBase',
     'IlluminanceCommand'

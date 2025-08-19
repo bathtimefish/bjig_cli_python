@@ -126,14 +126,14 @@ class UplinkNotification:
         from datetime import datetime
         
         return {
-            "protocol_version": f"0x{self.protocol_version:02X}",
-            "packet_type": f"0x{self.packet_type:02X}",
+            "protocol_version": f"{self.protocol_version:02X}",
+            "packet_type": f"{self.packet_type:02X}",
             "packet_type_name": "UPLINK_NOTIFICATION",
             "data_length": self.data_length,
             "unix_time": self.unix_time,
             "timestamp": datetime.fromtimestamp(self.unix_time).strftime('%Y-%m-%d %H:%M:%S'),
             "device_id": f"{self.device_id:016X}",
-            "sensor_id": f"0x{self.sensor_id:04X}",
+            "sensor_id": f"{self.sensor_id:04X}",
             "rssi": self.rssi,
             "order": self.order,
             "data_hex": self.data.hex(' ').upper(),

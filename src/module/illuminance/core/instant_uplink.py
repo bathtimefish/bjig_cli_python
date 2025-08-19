@@ -104,33 +104,29 @@ class InstantUplinkCommand(IlluminanceSensorBase):
         - ... LuxData[n] (4 bytes each)
         """
         try:
-            if len(sensor_data) < 16:  # Minimum size check
+            if len(sensor_data) < 12:  # Minimum size check (SensorID:2 + Time:4 + SampleNum:2 + LuxData:4)
                 return {"error": "Insufficient sensor data"}
             
             offset = 0
             result = {
                 "sensor_type": "illuminance",
-                "device_id": f"0x{self.device_id:016X}",
+                "device_id": f"{self.device_id:016X}",
                 "raw_packet": full_packet.hex(' ').upper(),
                 "sensor_data_hex": sensor_data.hex(' ').upper()
             }
             
-            # SensorID (2 bytes)
-            sensor_id = struct.unpack('<H', sensor_data[offset:offset+2])[0]
-            result["sensor_id"] = f"0x{sensor_id:04X}"
-            offset += 2
+            # BraveJIGパケットからSensorIDを取得（パケット内のbytes 16-17から）
+            # センサーデータ自体にはSensorIDは含まれない
+            result["sensor_id"] = "0121"  # 照度センサーの固定値
             
-            # Sequence No (2 bytes)  
-            sequence_no = struct.unpack('<H', sensor_data[offset:offset+2])[0]
-            result["sequence_no"] = sequence_no
-            offset += 2
+            # センサーデータの構造：Battery Level (1) + Sampling (1) + Time (4) + SampleNum (2) + LuxData...
             
             # Battery Level (1 byte)
             battery_level = sensor_data[offset]
             result["battery_level"] = f"{battery_level}%"
             offset += 1
             
-            # Sampling (1 byte)
+            # Sampling (1 byte) 
             sampling = sensor_data[offset]
             result["sampling_period"] = sampling
             offset += 1
@@ -159,7 +155,6 @@ class InstantUplinkCommand(IlluminanceSensorBase):
                         offset += 4
             
             result["lux_data"] = lux_data
-            result["lux_average"] = round(sum(lux_data) / len(lux_data), 2) if lux_data else 0.0
             
             return result
             

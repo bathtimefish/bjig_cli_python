@@ -106,13 +106,13 @@ class DownlinkResponse:
 
 class ModuleBase(ABC):
     """
-    BraveJIG モジュール基底クラス
+    BraveJIG モジュール基底クラス (現代化版)
     
     全モジュールで共通する処理パターンを提供:
-    - Downlinkリクエスト作成
-    - レスポンス解析
-    - エラーハンドリング
-    - ログ出力
+    - Command Pipeline Pattern
+    - Protocol Builder Pattern 
+    - 統一エラーハンドリング
+    - 現在動作中のロジックをベースに設計
     """
     
     def __init__(self, device_id: str, sensor_id: int, module_name: str):
@@ -130,43 +130,166 @@ class ModuleBase(ABC):
         
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
 
-    def create_downlink_request(self, cmd: int, data: bytes = b'', order: int = 0x0000) -> bytes:
-        """
-        Create downlink request packet using proven pattern
+    # === Protocol Builder Pattern (統一リクエスト作成) ===
+    
+    def create_instant_uplink_request(self) -> bytes:
+        """Create instant uplink request - 動作確認済みパターン"""
+        from lib.datetime_util import get_current_unix_time
+        import struct
         
-        Args:
-            cmd: Command code (ModuleCommand)
-            data: Command-specific data payload
-            order: Order field (default: 0x0000)
-            
-        Returns:
-            bytes: Complete downlink request packet
-        """
         unix_time = get_current_unix_time()
-        data_length = len(data)
+        data_payload = b''  # No data for instant uplink
+        data_length = len(data_payload)
         
-        request = DownlinkRequest(
-            data_length=data_length,
-            unix_time=unix_time,
-            device_id=self.device_id,
-            sensor_id=self.sensor_id,
-            cmd=cmd,
-            order=order,
-            data=data
-        )
+        # 動作確認済みのパターンを使用
+        packet = struct.pack('<BB', 0x01, 0x00)         # Protocol version, Packet type
+        packet += struct.pack('<H', data_length)        # Data length
+        packet += struct.pack('<L', unix_time)          # Unix time
+        packet += struct.pack('<Q', self.device_id)     # Device ID (little-endian)
+        packet += struct.pack('<H', self.sensor_id)     # SensorID
+        packet += struct.pack('<B', 0x00)               # CMD: INSTANT_UPLINK
+        packet += struct.pack('<H', 0xFFFF)             # Sequence No: Fixed
+        packet += data_payload                          # DATA
         
-        return request.to_bytes()
+        return packet
+    
+    def create_get_parameter_request(self) -> bytes:
+        """Create get parameter request - 動作確認済みパターン"""
+        from lib.datetime_util import get_current_unix_time
+        import struct
+        
+        unix_time = get_current_unix_time()
+        data_payload = struct.pack('<B', 0x00)  # Parameter info acquisition request
+        data_length = len(data_payload)
+        
+        # spec 6-4に従った動作確認済みパターン
+        packet = struct.pack('<BB', 0x01, 0x00)         # Protocol version, Packet type
+        packet += struct.pack('<H', data_length)        # Data length
+        packet += struct.pack('<L', unix_time)          # Unix time
+        packet += struct.pack('<Q', self.device_id)     # Device ID (little-endian)
+        packet += struct.pack('<H', 0x0000)             # SensorID: 0x0000 for parameter
+        packet += struct.pack('<B', 0x0D)               # CMD: GET_DEVICE_SETTING
+        packet += struct.pack('<H', 0xFFFF)             # Sequence No: Fixed
+        packet += data_payload                          # DATA
+        
+        return packet
+    
+    def create_set_parameter_request(self, param_data: bytes) -> bytes:
+        """Create set parameter request - 動作確認済みパターン"""
+        from lib.datetime_util import get_current_unix_time
+        import struct
+        
+        unix_time = get_current_unix_time()
+        data_length = len(param_data)
+        
+        # spec 6-2に従った動作確認済みパターン  
+        packet = struct.pack('<BB', 0x01, 0x00)         # Protocol version, Packet type
+        packet += struct.pack('<H', data_length)        # Data length
+        packet += struct.pack('<L', unix_time)          # Unix time
+        packet += struct.pack('<Q', self.device_id)     # Device ID (little-endian)
+        packet += struct.pack('<H', 0x0000)             # SensorID: 0x0000 for parameter
+        packet += struct.pack('<B', 0x05)               # CMD: SET_REGISTER
+        packet += struct.pack('<H', 0xFFFF)             # Sequence No: Fixed
+        packet += param_data                            # DATA
+        
+        return packet
+    
+    def create_device_restart_request(self) -> bytes:
+        """Create device restart request - 動作確認済みパターン"""
+        from lib.datetime_util import get_current_unix_time
+        import struct
+        
+        unix_time = get_current_unix_time()
+        data_payload = b''  # No data for restart
+        data_length = len(data_payload)
+        
+        # spec 6-5に従った動作確認済みパターン
+        packet = struct.pack('<BB', 0x01, 0x00)         # Protocol version, Packet type
+        packet += struct.pack('<H', data_length)        # Data length
+        packet += struct.pack('<L', unix_time)          # Unix time
+        packet += struct.pack('<Q', self.device_id)     # Device ID (little-endian)
+        packet += struct.pack('<H', 0x0000)             # SensorID: 0x0000 for device restart
+        packet += struct.pack('<B', 0xFD)               # CMD: DEVICE_RESTART
+        packet += struct.pack('<H', 0xFFFF)             # Sequence No: Fixed
+        packet += data_payload                          # DATA
+        
+        return packet
 
-    def parse_downlink_response(self, response_data: bytes) -> Dict[str, Any]:
+    # === Command Pipeline Pattern (統一実行フロー) ===
+    
+    def execute_command_with_response(self,
+                                    request_packet: bytes,
+                                    send_callback: Callable,
+                                    receive_callback: Callable,
+                                    timeout: float = 10.0,
+                                    command_name: str = "command") -> Dict[str, Any]:
         """
-        Parse downlink response using proven pattern
+        Execute command with downlink response pattern (動作確認済み)
         
         Args:
-            response_data: Raw response bytes
+            request_packet: Request packet to send
+            send_callback: Function to send data to router
+            receive_callback: Function to receive response
+            timeout: Response timeout in seconds
+            command_name: Command name for logging
             
         Returns:
-            Dict containing parsed response information
+            Dict containing execution results
         """
+        result = {
+            "success": False,
+            "command": command_name,
+            "device_id": f"0x{self.device_id:016X}",
+            "sensor_id": f"0x{self.sensor_id:04X}"
+        }
+        
+        try:
+            result["request_packet"] = request_packet.hex(' ').upper()
+            
+            self.logger.info(f"Sending {command_name} request: {request_packet.hex(' ').upper()}")
+            
+            if not send_callback(request_packet):
+                result["error"] = f"Failed to send {command_name} request"
+                return result
+            
+            # Wait for downlink response (動作確認済みのパターン)
+            import time
+            start_time = time.time()
+            response_data = None
+            
+            while (time.time() - start_time) < timeout:
+                response_data = receive_callback()
+                if response_data and len(response_data) >= 2:
+                    packet_type = response_data[1]
+                    if packet_type == 0x01:  # Downlink response
+                        break
+                time.sleep(0.1)
+            
+            if not response_data:
+                result["error"] = f"No response received within {timeout} seconds"
+                return result
+                
+            # Parse downlink response
+            response_info = self.parse_downlink_response(response_data)
+            result["response"] = response_info
+            
+            if response_info["success"]:
+                result["success"] = True
+                result["message"] = f"{command_name.title()} completed successfully"
+            else:
+                error_desc = response_info.get('result_desc') or response_info.get('error', 'Unknown error')
+                result["error"] = f"{command_name} failed: {error_desc}"
+                
+        except Exception as e:
+            result["error"] = f"{command_name} execution failed: {str(e)}"
+            self.logger.error(f"{command_name} error: {e}")
+        
+        return result
+
+    # === 応答解析 (動作確認済み) ===
+    
+    def parse_downlink_response(self, response_data: bytes) -> Dict[str, Any]:
+        """Parse downlink response using proven pattern"""
         try:
             response = DownlinkResponse.from_bytes(response_data)
             
@@ -231,76 +354,8 @@ class ModuleBase(ABC):
             "module_name": self.module_name,
         }
 
-    # 共通実行パターン
-    def execute_command_with_response(self,
-                                    request_packet: bytes,
-                                    send_callback: Callable,
-                                    receive_callback: Callable,
-                                    timeout: float = 10.0,
-                                    command_name: str = "command") -> Dict[str, Any]:
-        """
-        Execute command with downlink response pattern
-        
-        Args:
-            request_packet: Request packet to send
-            send_callback: Function to send data to router
-            receive_callback: Function to receive response
-            timeout: Response timeout in seconds
-            command_name: Command name for logging
-            
-        Returns:
-            Dict containing execution results
-        """
-        result = {
-            "success": False,
-            "command": command_name,
-            "device_id": f"0x{self.device_id:016X}",
-            "sensor_id": f"0x{self.sensor_id:04X}"
-        }
-        
-        try:
-            result["request_packet"] = request_packet.hex(' ').upper()
-            
-            self.logger.info(f"Sending {command_name} request: {request_packet.hex(' ').upper()}")
-            
-            if not send_callback(request_packet):
-                result["error"] = f"Failed to send {command_name} request"
-                return result
-            
-            # Wait for downlink response
-            start_time = time.time()
-            response_data = None
-            
-            while (time.time() - start_time) < timeout:
-                response_data = receive_callback()
-                if response_data and len(response_data) >= 2:
-                    packet_type = response_data[1]
-                    if packet_type == 0x01:  # Downlink response
-                        break
-                time.sleep(0.1)
-            
-            if not response_data:
-                result["error"] = f"No response received within {timeout} seconds"
-                return result
-                
-            # Parse downlink response
-            response_info = self.parse_downlink_response(response_data)
-            result["response"] = response_info
-            
-            if response_info["success"]:
-                result["success"] = True
-                result["message"] = f"{command_name.title()} completed successfully"
-            else:
-                error_desc = response_info.get('result_desc') or response_info.get('error', 'Unknown error')
-                result["error"] = f"{command_name} failed: {error_desc}"
-                
-        except Exception as e:
-            result["error"] = f"{command_name} execution failed: {str(e)}"
-            self.logger.error(f"{command_name} error: {e}")
-        
-        return result
-
-    # 抽象メソッド（各モジュールで実装）
+    # === 抽象メソッド（各モジュールで実装） ===
+    
     @abstractmethod
     def get_module_specific_info(self) -> Dict[str, Any]:
         """Get module-specific information (implemented by each module)"""
