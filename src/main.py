@@ -279,6 +279,10 @@ def handle_router_command(args):
     elif args.router_action == 'keep-alive':
         execute_router_keep_alive(args.port, args.baud)
     elif args.router_action == 'dfu':
+        # DFU時はボーレート38400必須
+        if args.baud != 38400:
+            print("❌ エラー: DFUを実行するにはボーレートは 38400 である必要があります。--baud 38400 を指定してください。")
+            return
         execute_router_dfu(args.port, args.baud, args.file)
 
 def handle_monitor_command(args):
@@ -313,6 +317,10 @@ def handle_module_command(args):
         print(f"センサーID: {args.sensor_id}")
         print(f"モジュールID: {args.module_id}")
         print(f"ファームウェアファイル: {args.file}")
+        # DFU時はボーレート38400必須
+        if args.baud != 38400:
+            print("❌ エラー: センサーDFUを実行するにはボーレートは 38400 である必要があります。--baud 38400 を指定してください。")
+            return
         execute_module_command(args.port, args.baud, args.sensor_id, args.module_id, 'sensor-dfu', firmware_file=args.file)
 
 def execute_module_command(port: str, baud: int, sensor_id: str, module_id: str, command: str, **kwargs):
@@ -355,26 +363,30 @@ def execute_module_command(port: str, baud: int, sensor_id: str, module_id: str,
             
             # コマンド実行
             if command == 'get-parameter':
-                handler.get_parameter(port, baud, effective_sensor_id, module_id)
+                result = handler.get_parameter(port, baud, effective_sensor_id, module_id)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
             elif command == 'set-parameter':
                 data = kwargs.get('data')
                 if not data:
                     error_output = {"error": "Missing parameter data for set-parameter command", "success": False}
                     print(json.dumps(error_output, ensure_ascii=False))
                     return
-                handler.set_parameter(port, baud, effective_sensor_id, module_id, data)
+                result = handler.set_parameter(port, baud, effective_sensor_id, module_id, data)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
             elif command == 'device-restart':
-                handler.device_restart(port, baud, module_id)
+                result = handler.device_restart(port, baud, module_id)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
             elif command == 'sensor-dfu':
                 firmware_file = kwargs.get('firmware_file')
                 if not firmware_file:
                     error_output = {"error": "Missing firmware file for sensor-dfu command", "success": False}
                     print(json.dumps(error_output, ensure_ascii=False))
                     return
-                handler.sensor_dfu(port, baud, effective_sensor_id, module_id, firmware_file)
+                result = handler.sensor_dfu(port, baud, effective_sensor_id, module_id, firmware_file)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
             elif command == 'instant-uplink':
-                # instant-uplinkを新体系で実行
-                handler.instant_uplink(port, baud, module_id)
+                result = handler.instant_uplink(port, baud, module_id)
+                print(json.dumps(result, ensure_ascii=False, indent=2))
             else:
                 supported_commands = handler.get_supported_commands()
                 error_output = {
@@ -389,17 +401,25 @@ def execute_module_command(port: str, baud: int, sensor_id: str, module_id: str,
                 # センサーIDが不要なコマンドは照度モジュールとして処理
                 from module.illuminance.illuminance_handler import IlluminanceHandler
                 handler = IlluminanceHandler()
+                
+                if not handler.validate_module_id(module_id):
+                    error_output = {"error": f"Invalid module ID format: {module_id}. Expected 16 hex digits.", "success": False}
+                    print(json.dumps(error_output, ensure_ascii=False))
+                    return
+                
                 if command == 'instant-uplink':
-                    handler.instant_uplink(port, baud, module_id)
+                    result = handler.instant_uplink(port, baud, module_id)
+                    print(json.dumps(result, ensure_ascii=False, indent=2))
                 elif command == 'device-restart':
-                    handler.device_restart(port, baud, module_id)
+                    result = handler.device_restart(port, baud, module_id)
+                    print(json.dumps(result, ensure_ascii=False, indent=2))
             else:
                 error_output = {
                     "error": f"Unsupported sensor ID: {sensor_id}. Currently supported: 0121 (illuminance)",
                     "success": False
                 }
                 print(json.dumps(error_output, ensure_ascii=False))
-    
+                
     except Exception as e:
         error_output = {"error": f"Module command execution failed: {str(e)}", "success": False}
         print(json.dumps(error_output, ensure_ascii=False))

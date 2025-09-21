@@ -17,11 +17,14 @@ Date: 2025-07-31
 """
 
 import struct
-import os
 import time
+import sys
+from datetime import datetime
+import zlib
 from typing import Dict, Any, List, Optional, Callable
 from pathlib import Path
 from ..base_illuminance import IlluminanceSensorBase, IlluminanceCommand
+from module.dfu_common import build_sensor_dfu_blocks
 
 
 class SensorDfuCommand(IlluminanceSensorBase):
@@ -48,7 +51,7 @@ class SensorDfuCommand(IlluminanceSensorBase):
         self._firmware_data: Optional[bytes] = None
         self._firmware_size: int = 0
         self._blocks: List[bytes] = []
-        self._current_block: int = 0
+    # Removed: _current_block no longer used after refactor to common DFU builder
 
     def validate_firmware_file(self, firmware_file: str) -> Dict[str, Any]:
         """
@@ -124,40 +127,36 @@ class SensorDfuCommand(IlluminanceSensorBase):
             
             self._firmware_size = len(self._firmware_data)
             
-            # Calculate CRC for firmware
-            firmware_crc = self._calculate_crc32(self._firmware_data)
+            # Calculate CRCs for informational purposes
+            # Manufacturer states: .bin includes CRC as the last 4 bytes (little-endian)
+            # We'll compute CRC32 over data excluding the last 4 bytes and also read embedded CRC for display
+            embedded_crc_le = None
+            computed_crc32 = None
+            if self._firmware_size >= 4:
+                embedded_crc_le = struct.unpack('<L', self._firmware_data[-4:])[0]
+                computed_crc32 = self._calculate_crc32(self._firmware_data[:-4])
+            else:
+                computed_crc32 = self._calculate_crc32(self._firmware_data)
             
-            # Create blocks
-            self._blocks = []
-            
-            # Block 1: 先頭ブロック (Sequence No: 0x0000)
-            block1 = self._create_header_block()
-            self._blocks.append(block1)
-            
-            # Block 2: 第2ブロック (Sequence No: 0x0001) - DFU data length + first data
-            block2 = self._create_second_block()
-            self._blocks.append(block2)
-            
-            # Continue blocks: 第3ブロック以降 (Sequence No: 0x0002~0xXXXX)
-            continue_blocks = self._create_continue_blocks()
-            self._blocks.extend(continue_blocks)
-            
-            # Final block: 最終ブロック (Sequence No: 0xFFFF)  
-            final_block = self._create_final_block(firmware_crc)
-            self._blocks.append(final_block)
+            # Create blocks using common DFU builder to avoid duplication
+            self._blocks = build_sensor_dfu_blocks(self.device_id, self.sensor_id, self._firmware_data)
             
             result = validation.copy()
             result.update({
                 "prepared": True,
                 "total_blocks": len(self._blocks),
                 "firmware_size": self._firmware_size,
-                "firmware_crc": f"0x{firmware_crc:08X}",
+                "embedded_crc": (f"0x{embedded_crc_le:08X}" if embedded_crc_le is not None else None),
+                "computed_crc32_excl_tail": (f"0x{computed_crc32:08X}" if computed_crc32 is not None else None),
+                "crc_match": (embedded_crc_le == computed_crc32 if embedded_crc_le is not None and computed_crc32 is not None else None),
                 "blocks_ready": True
             })
             
             self.logger.info(
                 f"Firmware prepared: {validation['file_name']} "
-                f"({self._firmware_size} bytes, {len(self._blocks)} blocks, CRC: 0x{firmware_crc:08X})"
+                f"({self._firmware_size} bytes, {len(self._blocks)} blocks, "
+                f"embedded CRC (tail): {('0x%08X' % embedded_crc_le) if embedded_crc_le is not None else 'N/A'}, "
+                f"computed CRC32 (excl tail): {('0x%08X' % computed_crc32) if computed_crc32 is not None else 'N/A'})"
             )
             
             return result
@@ -212,6 +211,14 @@ class SensorDfuCommand(IlluminanceSensorBase):
                 sequence_no = self._get_block_sequence_no(block_index)
                 
                 self.logger.info(f"Sending {block_type} (Sequence: 0x{sequence_no:04X}): {block_data.hex(' ').upper()}")
+
+                # If this is the second block, decode and log dfuDataLength for visibility
+                if sequence_no == 0x0001 and len(block_data) >= 25:
+                    try:
+                        dfu_len = struct.unpack('<L', block_data[21:25])[0]
+                        self.logger.info(f"DFU: dfuDataLength (from 2nd block) = {dfu_len} bytes (0x{dfu_len:08X})")
+                    except Exception as e:
+                        self.logger.warning(f"DFU: Failed to decode dfuDataLength: {e}")
                 
                 # Add debug output with time for block transmission
                 self._debug_block_packet_with_time(block_data, f"DFU BLOCK {block_index + 1} REQUEST SENT ({block_type})")
@@ -266,151 +273,7 @@ class SensorDfuCommand(IlluminanceSensorBase):
         
         return result
 
-    def _create_header_block(self) -> bytes:
-        """Create 先頭ブロック (Sequence No: 0x0000)"""
-        from lib.datetime_util import get_current_unix_time
-        
-        unix_time = get_current_unix_time()
-        
-        # DATA部: hardwareID(2バイト) + reserve(236バイト) = 238バイト
-        data_payload = struct.pack('<H', 0x0000)             # hardwareID: 0x0000 固定
-        data_payload += b'\xFF' * 236                        # Reserve: 0xFF padding
-        
-        data_length = len(data_payload)
-        
-        # Build packet according to spec 6-3
-        packet = struct.pack('<BB', 0x01, 0x00)         # Protocol version, Packet type (downlink request)
-        packet += struct.pack('<H', data_length)        # Data length
-        packet += struct.pack('<L', unix_time)          # Unix time
-        packet += struct.pack('<Q', self.device_id)     # Device ID (little-endian)
-        packet += struct.pack('<H', self.sensor_id)     # SensorID: 0x0121
-        packet += struct.pack('<B', 0x12)               # CMD: SENSOR_DFU
-        packet += struct.pack('<H', 0x0000)             # Sequence No: 0x0000
-        packet += data_payload                          # DATA: hardwareID + reserve
-        
-        return packet
-
-    def _create_second_block(self) -> bytes:
-        """Create 第2ブロック (Sequence No: 0x0001)"""
-        from lib.datetime_util import get_current_unix_time
-        
-        unix_time = get_current_unix_time()
-        
-        # DATA部: dfuDataLength(4バイト) + dfuDataBody(234バイト) = 238バイト
-        # dfuDataLength: CRCを含むファームウェア全体サイズ (リトルエンディアン)
-        data_payload = struct.pack('<L', self._firmware_size + 4)  # +4 for CRC
-        
-        # First 234 bytes of firmware data (ビッグエンディアン)
-        first_data = self._firmware_data[:234] if len(self._firmware_data) >= 234 else self._firmware_data
-        data_payload += first_data
-        
-        # Pad if necessary to 234 bytes
-        if len(first_data) < 234:
-            data_payload += b'\xFF' * (234 - len(first_data))
-        
-        data_length = len(data_payload)
-        
-        # Build packet according to spec 6-3
-        packet = struct.pack('<BB', 0x01, 0x00)         # Protocol version, Packet type (downlink request)
-        packet += struct.pack('<H', data_length)        # Data length
-        packet += struct.pack('<L', unix_time)          # Unix time
-        packet += struct.pack('<Q', self.device_id)     # Device ID (little-endian)
-        packet += struct.pack('<H', self.sensor_id)     # SensorID: 0x0121
-        packet += struct.pack('<B', 0x12)               # CMD: SENSOR_DFU
-        packet += struct.pack('<H', 0x0001)             # Sequence No: 0x0001
-        packet += data_payload                          # DATA: dfuDataLength + dfuDataBody
-        
-        return packet
-
-    def _create_continue_blocks(self) -> List[bytes]:
-        """Create 継続ブロック群 (Sequence No: 0x0002~0xXXXX)"""
-        from lib.datetime_util import get_current_unix_time
-        
-        blocks = []
-        data_offset = 234  # Start after second block data (234 bytes)
-        sequence_no = 0x0002
-        
-        while data_offset < self._firmware_size:
-            remaining = self._firmware_size - data_offset
-            block_data_size = min(238, remaining)
-            
-            # Don't create continue block if this would be the final block
-            # (final block is handled separately)
-            if remaining <= 238:
-                break
-            
-            unix_time = get_current_unix_time()
-            
-            # DATA部: dfuDataBody(238バイト)
-            # Extract block data (ビッグエンディアン)
-            block_data = self._firmware_data[data_offset:data_offset + block_data_size]
-            data_payload = block_data
-            
-            # Pad if necessary (should always be 238 for continue blocks)
-            if len(block_data) < 238:
-                data_payload += b'\xFF' * (238 - len(block_data))
-            
-            data_length = len(data_payload)
-            
-            # Build packet according to spec 6-3
-            packet = struct.pack('<BB', 0x01, 0x00)         # Protocol version, Packet type (downlink request)
-            packet += struct.pack('<H', data_length)        # Data length
-            packet += struct.pack('<L', unix_time)          # Unix time
-            packet += struct.pack('<Q', self.device_id)     # Device ID (little-endian)
-            packet += struct.pack('<H', self.sensor_id)     # SensorID: 0x0121
-            packet += struct.pack('<B', 0x12)               # CMD: SENSOR_DFU
-            packet += struct.pack('<H', sequence_no)        # Sequence No: 0x0002~0xXXXX
-            packet += data_payload                          # DATA: dfuDataBody
-            
-            blocks.append(packet)
-            
-            data_offset += block_data_size
-            sequence_no += 1
-            
-            # Prevent infinite loop
-            if sequence_no > 0xFFFE:
-                break
-        
-        return blocks
-
-    def _create_final_block(self, firmware_crc: int) -> bytes:
-        """Create 最終ブロック (Sequence No: 0xFFFF)"""
-        from lib.datetime_util import get_current_unix_time
-        
-        # Calculate remaining data offset after second block and continue blocks
-        data_offset = 234  # After second block (234 bytes)
-        continue_block_count = 0
-        remaining_after_second = self._firmware_size - 234
-        if remaining_after_second > 238:
-            continue_block_count = (remaining_after_second - 1) // 238  # Integer division
-        data_offset += continue_block_count * 238
-        
-        unix_time = get_current_unix_time()
-        
-        # DATA部: remaining dfuDataBody + dfuCrc(4バイト)
-        data_payload = b''
-        
-        # Add remaining firmware data (ビッグエンディアン)
-        if data_offset < self._firmware_size:
-            remaining_data = self._firmware_data[data_offset:]
-            data_payload += remaining_data
-        
-        # Add CRC (リトルエンディアン)
-        data_payload += struct.pack('<L', firmware_crc)      # dfuCrc (リトルエンディアン)
-        
-        data_length = len(data_payload)
-        
-        # Build packet according to spec 6-3
-        packet = struct.pack('<BB', 0x01, 0x00)         # Protocol version, Packet type (downlink request)
-        packet += struct.pack('<H', data_length)        # Data length
-        packet += struct.pack('<L', unix_time)          # Unix time
-        packet += struct.pack('<Q', self.device_id)     # Device ID (little-endian)
-        packet += struct.pack('<H', self.sensor_id)     # SensorID: 0x0121
-        packet += struct.pack('<B', 0x12)               # CMD: SENSOR_DFU
-        packet += struct.pack('<H', 0xFFFF)             # Sequence No: 0xFFFF
-        packet += data_payload                          # DATA: remaining dfuDataBody + dfuCrc
-        
-        return packet
+    # Legacy per-block DFU builders were removed after migration to common builder.
 
     def _transfer_block(self, block_index: int, block_data: bytes,
                        send_callback, receive_callback) -> Dict[str, Any]:
@@ -462,10 +325,6 @@ class SensorDfuCommand(IlluminanceSensorBase):
     
     def _debug_block_packet_with_time(self, packet_data: bytes, packet_type: str):
         """Debug output for DFU block packets with time conversion"""
-        import sys
-        import struct
-        from datetime import datetime
-        
         try:
             # Unix timeを抽出して日時に変換
             unix_time = struct.unpack('<L', packet_data[4:8])[0]
@@ -480,24 +339,9 @@ class SensorDfuCommand(IlluminanceSensorBase):
 
     def _calculate_crc32(self, data: bytes) -> int:
         """Calculate CRC32 checksum for firmware data"""
-        import zlib
         return zlib.crc32(data) & 0xFFFFFFFF
 
-    def _calculate_crc16(self, data: bytes) -> int:
-        """Calculate CRC16-CCITT checksum for firmware data"""
-        crc = 0xFFFF
-        polynomial = 0x1021
-        
-        for byte in data:
-            crc ^= (byte << 8)
-            for _ in range(8):
-                if crc & 0x8000:
-                    crc = (crc << 1) ^ polynomial
-                else:
-                    crc <<= 1
-                crc &= 0xFFFF
-        
-        return crc
+    # Note: CRC16 not used in sensor DFU flow; no CRC16 helper needed
 
     def get_dfu_status_summary(self, dfu_result: Dict[str, Any]) -> str:
         """Format DFU result for display"""
@@ -509,7 +353,9 @@ class SensorDfuCommand(IlluminanceSensorBase):
                 f"Firmware File: {prep.get('file_name', 'Unknown')}",
                 f"Firmware Size: {prep.get('file_size', 'Unknown')} bytes",
                 f"Blocks Transferred: {dfu_result.get('blocks_completed', 'Unknown')}/{dfu_result.get('total_blocks', 'Unknown')}",
-                f"CRC Checksum: {prep.get('firmware_crc', 'Unknown')}",
+                f"Embedded CRC (tail 4B): {prep.get('embedded_crc', 'Unknown')}",
+                f"Computed CRC32 (excl tail): {prep.get('computed_crc32_excl_tail', 'Unknown')}",
+                f"CRC Match: {prep.get('crc_match', 'Unknown')}",
                 f"",
                 f"✅ DFU completed successfully!",
                 f"   - Module will automatically restart with new firmware",

@@ -313,7 +313,7 @@ class CommandExecutor:
     def _execute_sensor_dfu(self, module_id: str, **kwargs) -> CommandResult:
         """Sensor DFU コマンド実行"""
         try:
-            from module.illuminance.sensor_dfu import SensorDfuCommand
+            from module.illuminance.core.sensor_dfu import SensorDfuCommand
             
             command = SensorDfuCommand(module_id)
             firmware_file = kwargs.get('firmware_file', '')

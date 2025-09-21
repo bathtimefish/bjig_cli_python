@@ -3,3 +3,7 @@ venv
 test
 .claude
 update-fw
+.serena
+*/__pycache__
+*/**/*.pyc
+*/**/*.pyo

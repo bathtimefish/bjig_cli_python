@@ -94,7 +94,7 @@ class GetParameterCommand(IlluminanceSensorBase):
         result = {
             "success": False,
             "command": "get_parameter",
-            "device_id": f"0x{self.device_id:016X}",
+            "device_id": f"{self.device_id:016X}",
             "sensor_id": f"0x{self.sensor_id:04X}"
         }
         
@@ -196,7 +196,7 @@ class GetParameterCommand(IlluminanceSensorBase):
             # Basic packet info
             result = {
                 "parameter_type": "illuminance_sensor",
-                "device_id": f"0x{self.device_id:016X}",
+                "device_id": f"{self.device_id:016X}",
                 "raw_packet": full_packet.hex(' ').upper(),
                 "param_data_hex": param_data.hex(' ').upper()
             }
@@ -217,10 +217,9 @@ class GetParameterCommand(IlluminanceSensorBase):
                 if 'fw_version' in metadata:
                     result["fw_version"] = metadata['fw_version']
                 if 'connected_sensor_id' in metadata:
-                    result["connected_sensor_id"] = f"0x{metadata['connected_sensor_id']:04X}"
+                    result["connected_sensor_id"] = f"{metadata['connected_sensor_id']:04X}"
                 
-                # Store the parameters object for later use
-                result["_parameters_object"] = params
+                # Note: _parameters_object is excluded from result to maintain JSON serialization
                 
                 # Add success indicator
                 result["success"] = True

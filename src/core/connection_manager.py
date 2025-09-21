@@ -103,7 +103,15 @@ class ConnectionManager:
         """BraveJIGルーターから切断"""
         if self._monitor:
             try:
-                self._monitor.stop_monitoring()
+                # まずモニタリングを停止
+                if self._monitor.is_monitoring:
+                    self._monitor.stop_monitoring()
+                
+                # 少し待機してスレッドが停止するのを待つ
+                import time
+                time.sleep(0.1)
+                
+                # 接続を切断
                 self._monitor.__exit__(None, None, None)
             except Exception as e:
                 self.logger.warning(f"Error during disconnect: {e}")
@@ -127,6 +135,15 @@ class ConnectionManager:
         """
         if not self.is_connected():
             raise RuntimeError("Not connected to BraveJIG router")
+        
+        # AsyncSerialMonitorがモニタリング中でない場合は再起動
+        if not self._monitor.is_monitoring:
+            self.logger.warning("Monitor not active, restarting monitoring")
+            try:
+                self._monitor.start_monitoring()
+            except Exception as e:
+                self.logger.error(f"Failed to restart monitoring: {e}")
+                return False
         
         self.logger.debug(f"Sending {len(data)} bytes: {data.hex(' ').upper()}")
         
