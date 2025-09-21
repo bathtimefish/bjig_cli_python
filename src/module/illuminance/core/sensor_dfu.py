@@ -124,40 +124,37 @@ class SensorDfuCommand(IlluminanceSensorBase):
             
             self._firmware_size = len(self._firmware_data)
             
-            # Calculate CRC for firmware
-            firmware_crc = self._calculate_crc32(self._firmware_data)
+            # Calculate CRCs for informational purposes
+            # Manufacturer states: .bin includes CRC as the last 4 bytes (little-endian)
+            # We'll compute CRC32 over data excluding the last 4 bytes and also read embedded CRC for display
+            embedded_crc_le = None
+            computed_crc32 = None
+            if self._firmware_size >= 4:
+                embedded_crc_le = struct.unpack('<L', self._firmware_data[-4:])[0]
+                computed_crc32 = self._calculate_crc32(self._firmware_data[:-4])
+            else:
+                computed_crc32 = self._calculate_crc32(self._firmware_data)
             
-            # Create blocks
-            self._blocks = []
-            
-            # Block 1: 先頭ブロック (Sequence No: 0x0000)
-            block1 = self._create_header_block()
-            self._blocks.append(block1)
-            
-            # Block 2: 第2ブロック (Sequence No: 0x0001) - DFU data length + first data
-            block2 = self._create_second_block()
-            self._blocks.append(block2)
-            
-            # Continue blocks: 第3ブロック以降 (Sequence No: 0x0002~0xXXXX)
-            continue_blocks = self._create_continue_blocks()
-            self._blocks.extend(continue_blocks)
-            
-            # Final block: 最終ブロック (Sequence No: 0xFFFF)  
-            final_block = self._create_final_block(firmware_crc)
-            self._blocks.append(final_block)
+            # Create blocks using common DFU builder to avoid duplication
+            from module.dfu_common import build_sensor_dfu_blocks
+            self._blocks = build_sensor_dfu_blocks(self.device_id, self.sensor_id, self._firmware_data)
             
             result = validation.copy()
             result.update({
                 "prepared": True,
                 "total_blocks": len(self._blocks),
                 "firmware_size": self._firmware_size,
-                "firmware_crc": f"0x{firmware_crc:08X}",
+                "embedded_crc": (f"0x{embedded_crc_le:08X}" if embedded_crc_le is not None else None),
+                "computed_crc32_excl_tail": (f"0x{computed_crc32:08X}" if computed_crc32 is not None else None),
+                "crc_match": (embedded_crc_le == computed_crc32 if embedded_crc_le is not None and computed_crc32 is not None else None),
                 "blocks_ready": True
             })
             
             self.logger.info(
                 f"Firmware prepared: {validation['file_name']} "
-                f"({self._firmware_size} bytes, {len(self._blocks)} blocks, CRC: 0x{firmware_crc:08X})"
+                f"({self._firmware_size} bytes, {len(self._blocks)} blocks, "
+                f"embedded CRC (tail): {('0x%08X' % embedded_crc_le) if embedded_crc_le is not None else 'N/A'}, "
+                f"computed CRC32 (excl tail): {('0x%08X' % computed_crc32) if computed_crc32 is not None else 'N/A'})"
             )
             
             return result
@@ -212,6 +209,14 @@ class SensorDfuCommand(IlluminanceSensorBase):
                 sequence_no = self._get_block_sequence_no(block_index)
                 
                 self.logger.info(f"Sending {block_type} (Sequence: 0x{sequence_no:04X}): {block_data.hex(' ').upper()}")
+
+                # If this is the second block, decode and log dfuDataLength for visibility
+                if sequence_no == 0x0001 and len(block_data) >= 25:
+                    try:
+                        dfu_len = struct.unpack('<L', block_data[21:25])[0]
+                        self.logger.info(f"DFU: dfuDataLength (from 2nd block) = {dfu_len} bytes (0x{dfu_len:08X})")
+                    except Exception as e:
+                        self.logger.warning(f"DFU: Failed to decode dfuDataLength: {e}")
                 
                 # Add debug output with time for block transmission
                 self._debug_block_packet_with_time(block_data, f"DFU BLOCK {block_index + 1} REQUEST SENT ({block_type})")
@@ -290,6 +295,9 @@ class SensorDfuCommand(IlluminanceSensorBase):
         
         return packet
 
+    # Legacy per-block builders below are retained for reference but unused.
+    # They remain import-safe and can help future debugging.
+
     def _create_second_block(self) -> bytes:
         """Create 第2ブロック (Sequence No: 0x0001)"""
         from lib.datetime_util import get_current_unix_time
@@ -297,8 +305,8 @@ class SensorDfuCommand(IlluminanceSensorBase):
         unix_time = get_current_unix_time()
         
         # DATA部: dfuDataLength(4バイト) + dfuDataBody(234バイト) = 238バイト
-        # dfuDataLength: CRCを含むファームウェア全体サイズ (リトルエンディアン)
-        data_payload = struct.pack('<L', self._firmware_size + 4)  # +4 for CRC
+        # dfuDataLength: .binの総サイズ（末尾4BのCRCを含む）をLEで格納
+        data_payload = struct.pack('<L', self._firmware_size)
         
         # First 234 bytes of firmware data (ビッグエンディアン)
         first_data = self._firmware_data[:234] if len(self._firmware_data) >= 234 else self._firmware_data
@@ -373,7 +381,7 @@ class SensorDfuCommand(IlluminanceSensorBase):
         
         return blocks
 
-    def _create_final_block(self, firmware_crc: int) -> bytes:
+    def _create_final_block(self) -> bytes:
         """Create 最終ブロック (Sequence No: 0xFFFF)"""
         from lib.datetime_util import get_current_unix_time
         
@@ -387,7 +395,7 @@ class SensorDfuCommand(IlluminanceSensorBase):
         
         unix_time = get_current_unix_time()
         
-        # DATA部: remaining dfuDataBody + dfuCrc(4バイト)
+        # DATA部: remaining dfuDataBody
         data_payload = b''
         
         # Add remaining firmware data (ビッグエンディアン)
@@ -395,8 +403,7 @@ class SensorDfuCommand(IlluminanceSensorBase):
             remaining_data = self._firmware_data[data_offset:]
             data_payload += remaining_data
         
-        # Add CRC (リトルエンディアン)
-        data_payload += struct.pack('<L', firmware_crc)      # dfuCrc (リトルエンディアン)
+        # CRCは.binの末尾に含まれているため、ここで追加は不要
         
         data_length = len(data_payload)
         
@@ -408,7 +415,7 @@ class SensorDfuCommand(IlluminanceSensorBase):
         packet += struct.pack('<H', self.sensor_id)     # SensorID: 0x0121
         packet += struct.pack('<B', 0x12)               # CMD: SENSOR_DFU
         packet += struct.pack('<H', 0xFFFF)             # Sequence No: 0xFFFF
-        packet += data_payload                          # DATA: remaining dfuDataBody + dfuCrc
+        packet += data_payload                          # DATA: remaining dfuDataBody
         
         return packet
 
@@ -509,7 +516,9 @@ class SensorDfuCommand(IlluminanceSensorBase):
                 f"Firmware File: {prep.get('file_name', 'Unknown')}",
                 f"Firmware Size: {prep.get('file_size', 'Unknown')} bytes",
                 f"Blocks Transferred: {dfu_result.get('blocks_completed', 'Unknown')}/{dfu_result.get('total_blocks', 'Unknown')}",
-                f"CRC Checksum: {prep.get('firmware_crc', 'Unknown')}",
+                f"Embedded CRC (tail 4B): {prep.get('embedded_crc', 'Unknown')}",
+                f"Computed CRC32 (excl tail): {prep.get('computed_crc32_excl_tail', 'Unknown')}",
+                f"CRC Match: {prep.get('crc_match', 'Unknown')}",
                 f"",
                 f"✅ DFU completed successfully!",
                 f"   - Module will automatically restart with new firmware",

@@ -279,6 +279,10 @@ def handle_router_command(args):
     elif args.router_action == 'keep-alive':
         execute_router_keep_alive(args.port, args.baud)
     elif args.router_action == 'dfu':
+        # DFU時はボーレート38400必須
+        if args.baud != 38400:
+            print("❌ エラー: DFUを実行するにはボーレートは 38400 である必要があります。--baud 38400 を指定してください。")
+            return
         execute_router_dfu(args.port, args.baud, args.file)
 
 def handle_monitor_command(args):
@@ -313,6 +317,10 @@ def handle_module_command(args):
         print(f"センサーID: {args.sensor_id}")
         print(f"モジュールID: {args.module_id}")
         print(f"ファームウェアファイル: {args.file}")
+        # DFU時はボーレート38400必須
+        if args.baud != 38400:
+            print("❌ エラー: センサーDFUを実行するにはボーレートは 38400 である必要があります。--baud 38400 を指定してください。")
+            return
         execute_module_command(args.port, args.baud, args.sensor_id, args.module_id, 'sensor-dfu', firmware_file=args.file)
 
 def execute_module_command(port: str, baud: int, sensor_id: str, module_id: str, command: str, **kwargs):

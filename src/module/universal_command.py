@@ -450,10 +450,11 @@ class UniversalCommand(ModuleBase, UplinkWaitMixin, ParameterMixin, ExecutorMixi
         except Exception as e:
             return {"success": False, "error": f"Failed to read firmware file: {str(e)}"}
         
-        # Create DFU blocks using legacy logic
+        # Create DFU blocks using common builder
         try:
-            blocks = self._create_dfu_blocks(firmware_data)
-            print(f"DEBUG: SENSOR DFU - Created {len(blocks)} blocks for transfer")
+            from module.dfu_common import build_sensor_dfu_blocks
+            blocks = build_sensor_dfu_blocks(self.device_id, self.sensor_id, firmware_data)
+            print(f"DEBUG: SENSOR DFU - Created {len(blocks)} blocks for transfer (common builder)")
         except Exception as e:
             return {"success": False, "error": f"Failed to create DFU blocks: {str(e)}"}
         
@@ -485,6 +486,15 @@ class UniversalCommand(ModuleBase, UplinkWaitMixin, ParameterMixin, ExecutorMixi
             
             print(f"DEBUG: SENSOR DFU - Sending {block_type} (Seq: 0x{sequence_no:04X})")
             print(f"DEBUG: SENSOR DFU BLOCK {block_index + 1} REQUEST SENT: {block_data.hex(' ').upper()}")
+
+            # If this is the second block, decode and print dfuDataLength for visibility
+            if sequence_no == 0x0001 and len(block_data) >= 25:
+                try:
+                    # payload starts at offset 21; dfuDataLength is 4 bytes LE
+                    dfu_len = struct.unpack('<L', block_data[21:25])[0]
+                    print(f"DEBUG: SENSOR DFU - dfuDataLength (from 2nd block): {dfu_len} bytes (0x{dfu_len:08X})")
+                except Exception as e:
+                    print(f"DEBUG: SENSOR DFU - Failed to decode dfuDataLength: {e}")
             
             # Reset response flag
             received_data["downlink_response"] = None
@@ -532,24 +542,8 @@ class UniversalCommand(ModuleBase, UplinkWaitMixin, ParameterMixin, ExecutorMixi
 
     def _create_dfu_blocks(self, firmware_data: bytes) -> List[bytes]:
         """Create 4-block DFU transfer packets based on legacy implementation"""
-        blocks = []
-        firmware_size = len(firmware_data)
-        firmware_crc = self._calculate_crc32(firmware_data)
-        
-        # Block 1: 先頭ブロック (Sequence No: 0x0000) - Header block
-        blocks.append(self._create_header_block())
-        
-        # Block 2: 第2ブロック (Sequence No: 0x0001) - Data length + first data
-        blocks.append(self._create_second_block(firmware_data, firmware_size))
-        
-        # Continue blocks: 継続ブロック (Sequence No: 0x0002~0xXXXX)
-        continue_blocks = self._create_continue_blocks(firmware_data)
-        blocks.extend(continue_blocks)
-        
-        # Final block: 最終ブロック (Sequence No: 0xFFFF) - Final data + CRC
-        blocks.append(self._create_final_block(firmware_data, firmware_crc))
-        
-        return blocks
+        from module.dfu_common import build_sensor_dfu_blocks
+        return build_sensor_dfu_blocks(self.device_id, self.sensor_id, firmware_data)
     
     def _create_header_block(self) -> bytes:
         """Create 先頭ブロック (Sequence No: 0x0000)"""
@@ -586,7 +580,8 @@ class UniversalCommand(ModuleBase, UplinkWaitMixin, ParameterMixin, ExecutorMixi
         device_id_int = self.device_id if isinstance(self.device_id, int) else int(self.device_id, 16)
         
         # DATA部: dfuDataLength(4バイト) + dfuDataBody(234バイト) = 238バイト
-        data_payload = struct.pack('<L', firmware_size + 4)  # +4 for CRC
+        # メーカー仕様: .binの総サイズ（末尾4BのCRCを含む）をLEで格納
+        data_payload = struct.pack('<L', firmware_size)
         
         # First 234 bytes of firmware data
         first_data = firmware_data[:234] if len(firmware_data) >= 234 else firmware_data
@@ -662,7 +657,7 @@ class UniversalCommand(ModuleBase, UplinkWaitMixin, ParameterMixin, ExecutorMixi
         
         return blocks
     
-    def _create_final_block(self, firmware_data: bytes, firmware_crc: int) -> bytes:
+    def _create_final_block(self, firmware_data: bytes) -> bytes:
         """Create 最終ブロック (Sequence No: 0xFFFF)"""
         from lib.datetime_util import get_current_unix_time
         import struct
@@ -679,7 +674,7 @@ class UniversalCommand(ModuleBase, UplinkWaitMixin, ParameterMixin, ExecutorMixi
         unix_time = get_current_unix_time()
         device_id_int = self.device_id if isinstance(self.device_id, int) else int(self.device_id, 16)
         
-        # DATA部: remaining dfuDataBody + dfuCrc(4バイト)
+        # DATA部: remaining dfuDataBody（CRCは.bin末尾に既に含有）
         data_payload = b''
         
         # Add remaining firmware data
@@ -687,8 +682,7 @@ class UniversalCommand(ModuleBase, UplinkWaitMixin, ParameterMixin, ExecutorMixi
             remaining_data = firmware_data[data_offset:]
             data_payload += remaining_data
         
-        # Add CRC (little endian)
-        data_payload += struct.pack('<L', firmware_crc)
+        # 追加のCRCは不要（.bin末尾の4BがCRC）
         
         data_length = len(data_payload)
         
@@ -700,7 +694,7 @@ class UniversalCommand(ModuleBase, UplinkWaitMixin, ParameterMixin, ExecutorMixi
         packet += struct.pack('<H', 0x0121)         # SensorID: 0x0121
         packet += struct.pack('<B', 0x12)           # CMD: SENSOR_DFU
         packet += struct.pack('<H', 0xFFFF)         # Sequence No: 0xFFFF
-        packet += data_payload                      # DATA: remaining dfuDataBody + dfuCrc
+        packet += data_payload                      # DATA: remaining dfuDataBody
         
         return packet
     
